@@ -113,7 +113,7 @@
   /* 카드 전체 덮는 고정 아트워크(SVG) — 뒷면은 전체, 앞면은 하단 푸터 */
   .dc-fixed-svg{position:absolute;inset:0;width:100%;height:100%;display:block;pointer-events:none}
   /* === 정보면 동적 오버레이 (AI 원본 좌표를 cqw로 환산) === */
-  .dci-rule{position:absolute;left:6.13cqw;right:6.13cqw;height:1px;border:0;margin:0;background:currentColor;opacity:.42;z-index:1}
+  .dci-rule{position:absolute;left:6.13cqw;right:6.13cqw;height:1px;border:0;margin:0;background:currentColor;opacity:.75;z-index:1}
   .dci-text{position:absolute;line-height:1;z-index:1;white-space:nowrap}
   .dci-nameko {top:9.75cqw;left:6.13cqw;font-family:var(--sans); font-weight:700;font-size:3.00cqw;color:var(--card-ink)}
   .dci-teamko {top:13.87cqw;left:6.13cqw;font-family:var(--sans);font-weight:300;font-size:2.06cqw;color:var(--card-ink);opacity:.9}
@@ -492,22 +492,40 @@ const REASONS=[
 
 /* ---------- 4. 부트스트랩 ---------- */
 async function boot(){
+  // 1) 로컬 캐시로 초기 부팅 (즉시 화면)
   const saved = await store.get('config:main');
   CONFIG = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
   if(saved){
     if(saved.vendorEmail) CONFIG.vendorEmail = saved.vendorEmail;
-    if(saved._v === CONFIG_VERSION){ // 동일 버전이면 사용자 커스텀 유지
+    if(saved._v === CONFIG_VERSION){
       if(saved.teams) CONFIG.teams = saved.teams;
       if(saved.roles) CONFIG.roles = saved.roles;
       CONFIG.brand  = Object.assign({}, DEFAULT_CONFIG.brand,  saved.brand||{});
       CONFIG.design = Object.assign({}, DEFAULT_CONFIG.design, saved.design||{});
-    } // 구버전이면 DEAR.CUS 최신 기본값으로 갱신(발주처 이메일만 보존)
+    }
   }
   CONFIG._v = CONFIG_VERSION;
   document.getElementById('brandName').textContent = CONFIG.brand.name || '명함 스튜디오';
-  applyTheme();
-  await refreshBrandQR();
-  render();
+  applyTheme(); await refreshBrandQR(); render();
+  // 2) 시트에서 최신 설정 fetch — 있으면 덮어쓰고 다시 렌더 (백그라운드)
+  fetchSheetConfigAndApply();
+}
+async function fetchSheetConfigAndApply(){
+  try{
+    if(!API_URL || String(API_URL).startsWith('__')) return;
+    const r = await fetch(API_URL + '?action=config', { redirect:'follow' });
+    const d = await r.json();
+    if(d && d.ok && d.config && typeof d.config === 'object'){
+      const c = d.config;
+      if(c.teams) CONFIG.teams = c.teams;
+      if(c.roles) CONFIG.roles = c.roles;
+      if(c.brand) CONFIG.brand = Object.assign({}, DEFAULT_CONFIG.brand, c.brand);
+      if(c.design) CONFIG.design = Object.assign({}, DEFAULT_CONFIG.design, c.design);
+      if(c.vendorEmail) CONFIG.vendorEmail = c.vendorEmail;
+      await store.set('config:main', CONFIG);  // 로컬 캐시도 갱신
+      applyTheme(); await refreshBrandQR(); render();
+    }
+  }catch(e){ console.warn('시트 설정 fetch 실패(로컬 캐시 사용):', e); }
 }
 function go(v){ state.view=v; if(v==='apply')state.step=0; render(); }
 function setNav(){ document.getElementById('navApply').classList.toggle('active',state.view==='apply');
@@ -863,24 +881,46 @@ function screenDone(){
 }
 function resetApply(){ state.app={ reason:'', type:'양면', nameKo:'', nameEn:'', team:'', role:'', mobile:'', email:'', ext:'' }; state.step=0; state.side='front'; render(); }
 
+// downloadPDF/JPG: 로컬 캐시 우선, 없으면 시트 캐시(_sheetRecs)에서 찾기
+async function _getRec(id){
+  if(id && id.indexOf('sheet_')===0 && Array.isArray(window._sheetRecs)){
+    const r = window._sheetRecs.find(x=>x.id===id); if(r) return r;
+  }
+  return (await store.get('applications:'+id)) || state.app;
+}
 async function downloadPDF(id){
   toast('PDF 생성 중…');
-  const rec=await store.get('applications:'+id) || state.app;
+  const rec=await _getRec(id);
   const doc=await buildPDF(rec,false);
   doc.save(safeFile(rec)+'.pdf');
 }
 async function downloadJPG(id){
   toast('JPG 생성 중…');
-  const rec=await store.get('applications:'+id) || state.app;
+  const rec=await _getRec(id);
   const blob=await buildJPG(rec);
   triggerDownload(blob, safeFile(rec)+'_앞면.jpg');
 }
 
 /* ============================== ADMIN ============================== */
 let adminTab='dash';
+async function fetchSheetApplications(){
+  try{
+    if(!API_URL || String(API_URL).startsWith('__')) return null;
+    const r = await fetch(API_URL + '?action=applications', { redirect:'follow' });
+    const d = await r.json();
+    if(d && d.ok && Array.isArray(d.list)){
+      window._sheetRecs = d.list;
+      return d.list;
+    }
+  }catch(e){ console.warn('시트 신청목록 fetch 실패:', e); }
+  return null;
+}
 async function renderAdmin(){
   const app=document.getElementById('app');
-  const recs=(await store.list('applications:')).sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
+  // 시트 우선, 실패시 로컬 캐시
+  let recs = await fetchSheetApplications();
+  if(!recs){ recs = (await store.list('applications:')); }
+  recs = recs.sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
   const tabs=`<div class="tabs">
     ${['dash:대시보드','print:인쇄 발주','design:디자인','config:팀·브랜드 설정'].map(t=>{const[k,l]=t.split(':');
       return `<button class="${adminTab===k?'active':''}" onclick="adminTab='${k}';renderAdmin()">${l}</button>`}).join('')}</div>`;
@@ -1069,8 +1109,25 @@ function rmRole(i){ CONFIG.roles.splice(i,1); saveConfig(); renderAdmin(); }
 function setRole(i,f,v){ if(typeof CONFIG.roles[i]==='string') CONFIG.roles[i]={ko:CONFIG.roles[i],en:''}; CONFIG.roles[i][f]=v; }
 function onQRUpload(input){ const f=input.files&&input.files[0]; if(!f)return;
   const rd=new FileReader(); rd.onload=()=>{ CONFIG.brand.qrImage=rd.result; toast('QR 이미지가 교체되었습니다'); renderAdmin(); }; rd.readAsDataURL(f); }
-async function saveConfig(){ await store.set('config:main',CONFIG);
-  const bn=document.getElementById('brandName'); if(bn) bn.textContent=CONFIG.brand.name||'명함 스튜디오'; }
+let _pushTimer=null;
+async function saveConfig(){
+  await store.set('config:main', CONFIG);
+  const bn=document.getElementById('brandName'); if(bn) bn.textContent=CONFIG.brand.name||'명함 스튜디오';
+  // 시트로 1.5초 디바운스 푸시 — 빠른 연속 편집에도 1번만 호출
+  if(_pushTimer) clearTimeout(_pushTimer);
+  _pushTimer = setTimeout(pushSheetConfig, 1500);
+}
+async function pushSheetConfig(){
+  try{
+    if(!API_URL || String(API_URL).startsWith('__')) return;
+    await fetch(API_URL, {
+      method:'POST',
+      headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body: JSON.stringify({ action:'config', config: CONFIG }),
+      redirect:'follow'
+    });
+  }catch(e){ console.warn('시트 설정 push 실패:', e); }
+}
 async function resetConfig(){ CONFIG=JSON.parse(JSON.stringify(DEFAULT_CONFIG)); await store.set('config:main',CONFIG);
   document.getElementById('brandName').textContent=CONFIG.brand.name; applyTheme(); renderAdmin(); toast('기본값으로 초기화했습니다'); }
 
