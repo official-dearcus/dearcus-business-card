@@ -331,13 +331,12 @@ function _blobToBase64(blob){
 }
 
 async function submitToBackend(application, pdfBlob){
-  if(!isConfigured()) throw new Error('백엔드가 아직 설정되지 않았습니다(API_URL/OAUTH_CLIENT_ID 미입력).');
-  const idToken=await signInWithGoogle();
-  const pdfBase64=await _blobToBase64(pdfBlob);
+  if(!API_URL || String(API_URL).startsWith('__')) return null;   // 백엔드 미설정시 조용히 패스
+  const pdfBase64 = pdfBlob ? await _blobToBase64(pdfBlob) : '';
   const r=await fetch(API_URL,{
     method:'POST',
     headers:{'Content-Type':'text/plain;charset=utf-8'},  // CORS preflight 회피
-    body:JSON.stringify({idToken, application, pdfBase64}),
+    body:JSON.stringify({application, pdfBase64}),         // idToken 제거 (anonymous)
     redirect:'follow'
   });
   const data=await r.json();
@@ -586,32 +585,52 @@ function dcInfoHTML(a){
 }
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));}
 
-/* ---------- 6. 명함 PDF 캡처 (html2canvas -> dataURL) ---------- */
-async function captureSide(side){
+/* ---------- 6. 명함 캡처 (html2canvas → canvas/dataURL) ---------- */
+async function captureSide(side, opts){
+  opts = opts || {};
   const host=document.getElementById('capture-host');
-  const W=540,H=Math.round(540*54/94); // 94x54mm 디자인 단위
+  const W = opts.W || 1080;                                // 기본 1080px (PDF용 — 94mm @ ~1170dpi)
+  const H = Math.round(W*54/94);
   const box=document.createElement('div');
   box.className='bizcard'; box.style.cssText=`width:${W}px;height:${H}px;border-radius:0;box-shadow:none`;
   box.innerHTML = side==='back'?cardBackHTML(state.app):cardFrontHTML(state.app);
   host.innerHTML=''; host.appendChild(box);
   if(document.fonts && document.fonts.ready){ try{ await document.fonts.ready; }catch(e){} }
-  await new Promise(r=>setTimeout(r,60));
-  const canvas=await html2canvas(box,{scale:4,backgroundColor:(side==='back'?CONFIG.design.backBg:CONFIG.design.cardBg)||'#ffffff',logging:false,useCORS:true});
+  await new Promise(r=>setTimeout(r,80));
+  const canvas=await html2canvas(box,{
+    scale: opts.scale || 4,
+    backgroundColor:(side==='back'?CONFIG.design.backBg:CONFIG.design.cardBg)||'#ffffff',
+    logging:false, useCORS:true, imageTimeout: 0
+  });
   host.innerHTML='';
-  return canvas.toDataURL('image/png');
+  if(opts.canvas) return canvas;
+  return canvas.toDataURL(opts.format || 'image/png');
 }
-// 90x50mm 2면 PDF 생성 (front, back)
+// 94x54mm 2면 PDF (front + back) — 인쇄소 전달용 최대 해상도
 async function buildPDF(app, returnBlob){
-  const prev=state.app; state.app=app; // 캡처용 임시 주입
-  const f=await captureSide('front');
-  const b=await captureSide('back');
+  const prev=state.app; state.app=app;
+  const f=await captureSide('front', {W: 1620, scale: 6});   // 9720px @94mm ≈ 2620dpi
+  const b=await captureSide('back',  {W: 1620, scale: 6});
   state.app=prev;
   const {jsPDF}=window.jspdf;
   const doc=new jsPDF({orientation:'landscape',unit:'mm',format:[94,54]});
-  doc.addImage(f,'PNG',0,0,94,54);
-  if((app.type||'양면')==='양면'){ doc.addPage([94,54],'landscape'); doc.addImage(b,'PNG',0,0,94,54); }
+  doc.addImage(f,'PNG',0,0,94,54,undefined,'NONE');           // 무압축 PNG (sharpness 우선)
+  if((app.type||'양면')==='양면'){ doc.addPage([94,54],'landscape'); doc.addImage(b,'PNG',0,0,94,54,undefined,'NONE'); }
   if(returnBlob) return doc.output('blob');
   return doc;
+}
+// 앞면만 JPG, 50% 축소 (출력 담당자가 빠르게 확인용)
+async function buildJPG(app){
+  const prev=state.app; state.app=app;
+  const canvas=await captureSide('front', {W: 540, scale: 4, canvas: true});  // 2160px ≈ 580dpi
+  state.app=prev;
+  return new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.92));
+}
+function triggerDownload(blob, filename){
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a'); a.href=url; a.download=filename;
+  document.body.appendChild(a); a.click();
+  setTimeout(()=>{URL.revokeObjectURL(url); a.remove();}, 200);
 }
 function safeFile(app){ const en=(app.nameEn||app.nameKo||'card').replace(/\s+/g,'_'); return `명함_${app.nameKo||''}_${en}`.replace(/[\\/:*?"<>|]/g,''); }
 
@@ -790,25 +809,34 @@ function setReviewImg(){ const img=document.getElementById('magimg');
 function flipReview(){ state.side=state.side==='front'?'back':'front'; setReviewImg(); }
 
 async function submitApp(){
-  const btn=document.getElementById('submitBtn'); if(btn){btn.disabled=true;btn.textContent='PDF 생성 중…';}
+  const btn=document.getElementById('submitBtn'); if(btn){btn.disabled=true;btn.textContent='JPG 생성 중…';}
   const a=Object.assign({},state.app);
   const id='card_'+Date.now();
   const now=new Date();
   const ym=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0');
   const rec=Object.assign({id,ym,createdAt:now.toISOString(),status:'신청'},a);
   try{
-    // PDF 생성 + 브라우저 자동 다운로드 (로그인 없이)
-    const doc=await buildPDF(rec,false);
-    const filename=safeFile(rec)+'.pdf';
-    doc.save(filename);
+    // 1) 출력 담당자용 JPG(앞면, 50%) 자동 다운로드
+    const jpgBlob=await buildJPG(rec);
+    const filename=safeFile(rec)+'_앞면.jpg';
+    triggerDownload(jpgBlob, filename);
     rec.fileName=filename;
-    await store.set('applications:'+id, rec);   // 로컬 캐시 (관리자 미리보기용)
-    state._lastId=id; state._lastFileUrl='';    // 백엔드 URL은 없음 (로컬 다운로드만)
-    state._lastFileName=filename;
+    // 2) 로컬 캐시
+    await store.set('applications:'+id, rec);
+    state._lastId=id; state._lastFileName=filename;
     state.step=4; render();
+    // 3) 백엔드(시트+드라이브) 비동기 동기화 — 실패해도 사용자 흐름엔 영향 X
+    (async()=>{
+      try{
+        if(btn) btn.textContent='시트 동기화 중…';
+        const pdfBlob=await buildPDF(rec,true);          // 고해상도 PDF (시트 아카이브용)
+        const result=await submitToBackend(rec, pdfBlob);
+        if(result && result.fileUrl){ rec.fileUrl=result.fileUrl; rec.folderUrl=result.folderUrl; await store.set('applications:'+id, rec); }
+      }catch(e){ console.warn('백엔드 동기화 실패:', e); }
+    })();
   }catch(err){
     if(btn){btn.disabled=false;btn.textContent='이대로 신청 완료 →';}
-    alert('PDF 생성 실패: '+(err && err.message || err));
+    alert('JPG 생성 실패: '+(err && err.message || err));
   }
 }
 
@@ -818,7 +846,7 @@ function screenDone(){
   return `<div class="screen"><div class="done-card">
     <div class="done-mark">✓</div>
     <h1 class="title" style="font-size:36px"><em>${esc(a.nameKo)}</em>님의 명함이<br>준비되었어요</h1>
-    <p class="sub" style="margin:18px auto 0">인쇄용 PDF가 자동으로 다운로드 되었습니다.<br>다운로드가 안 되었다면 아래 버튼을 눌러 받으세요.</p>
+    <p class="sub" style="margin:18px auto 0">출력용 JPG(앞면)가 자동으로 다운로드 되었습니다.<br>양면 인쇄용 PDF가 필요하시면 아래에서 받으세요.</p>
     ${fname}
     <div class="pipe">
       <span class="node">신청 정보</span><span class="arrow">→</span>
@@ -827,19 +855,25 @@ function screenDone(){
       <span class="node">인쇄소 발주</span>
     </div>
     <div class="actions" style="justify-content:center">
-      <button class="btn btn-primary" onclick="downloadOne('${state._lastId}')">📄 인쇄용 PDF 받기</button>
+      <button class="btn btn-primary" onclick="downloadJPG('${state._lastId}')">🖼 JPG 다시 받기 (앞면)</button>
+      <button class="btn btn-ghost" onclick="downloadPDF('${state._lastId}')">📄 양면 PDF 받기</button>
       <button class="btn btn-ghost" onclick="resetApply()">새 명함 만들기</button>
-      <button class="btn btn-ghost" onclick="go('admin')">관리자에서 확인 →</button>
     </div>
   </div></div>`;
 }
 function resetApply(){ state.app={ reason:'', type:'양면', nameKo:'', nameEn:'', team:'', role:'', mobile:'', email:'', ext:'' }; state.step=0; state.side='front'; render(); }
 
-async function downloadOne(id){
+async function downloadPDF(id){
   toast('PDF 생성 중…');
   const rec=await store.get('applications:'+id) || state.app;
   const doc=await buildPDF(rec,false);
   doc.save(safeFile(rec)+'.pdf');
+}
+async function downloadJPG(id){
+  toast('JPG 생성 중…');
+  const rec=await store.get('applications:'+id) || state.app;
+  const blob=await buildJPG(rec);
+  triggerDownload(blob, safeFile(rec)+'_앞면.jpg');
 }
 
 /* ============================== ADMIN ============================== */
@@ -857,7 +891,7 @@ async function renderAdmin(){
   if(adminTab==='config') body=adminConfig();
   app.innerHTML=`<div class="screen"><div class="wrap">
     <div class="adm-head"><div><div class="eyebrow">Operations</div>
-      <h1 class="title" style="font-size:32px">경영관리팀 콘솔</h1></div>
+      <h1 class="title" style="font-size:32px">명함 발주 콘솔</h1></div>
       <div class="mini">${isConfigured()?'● 백엔드 연결됨 (Sheet+Drive)':(hasStore?'● 로컬 저장 모드':'○ 메모리 모드 (세션 한정)')}
         ${(!String(SHEET_URL).startsWith('__'))?` · <a href="${SHEET_URL}" target="_blank" rel="noopener" style="color:var(--clay);text-decoration:underline">📊 시트 열기</a>`:''}
       </div></div>
@@ -877,7 +911,8 @@ function adminDash(recs){
     <td>${r.createdAt.slice(0,10)}</td><td><b>${esc(r.nameKo)}</b><div class="mini">${esc(r.nameEn)}</div></td>
     <td>${esc(r.team)}</td><td>${esc(r.role)}</td><td>${esc(r.reason)}</td>
     <td><span class="pill">${esc(r.status)}</span></td>
-    <td class="row-flex"><button class="icon-btn" title="PDF" onclick="downloadOne('${r.id}')">📄</button>
+    <td class="row-flex"><button class="icon-btn" title="PDF (양면)" onclick="downloadPDF('${r.id}')">📄</button>
+      <button class="icon-btn" title="JPG (앞면)" onclick="downloadJPG('${r.id}')">🖼</button>
       <button class="icon-btn" title="삭제" onclick="delRec('${r.id}')">🗑</button></td></tr>`).join('');
   return stats+`<div class="row-flex" style="justify-content:flex-end;margin-bottom:14px">
       <button class="btn btn-ghost" onclick="exportCSV()">⤓ CSV 내보내기</button></div>
@@ -1005,18 +1040,8 @@ function adminConfig(){
     <input value="${esc(ko)}" onchange="setRole(${i},'ko',this.value)" placeholder="직책(국문)">
     <input value="${esc(en)}" onchange="setRole(${i},'en',this.value)" placeholder="영문 직함 (예: Detail Innovator)">
     <button class="icon-btn" onclick="rmRole(${i})">🗑</button></div>`;}).join('');
-  return `<div class="cfg-card"><h3>브랜드 정보</h3><p class="d">명함과 발주 문서에 들어가는 회사 정보입니다.</p>
+  return `<div class="cfg-card"><h3>명함 콘텐츠 (DEAR.CUS형 공통 항목)</h3><p class="d">뒷면 태그라인·주소·QR은 전 직원 공통으로 명함에 들어갑니다. 앞면 하단의 로고/태그라인/QR은 벡터 SVG로 임베드되어 있어 별도 설정이 필요 없습니다.</p>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-      <div class="field"><label>회사명(로고 텍스트)</label><input value="${esc(c.name)}" onchange="CONFIG.brand.name=this.value;saveConfig()"></div>
-      <div class="field"><label>태그라인</label><input value="${esc(c.tagline)}" onchange="CONFIG.brand.tagline=this.value;saveConfig()"></div>
-      <div class="field"><label>주소</label><input value="${esc(c.address)}" onchange="CONFIG.brand.address=this.value;saveConfig()"></div>
-      <div class="field"><label>웹사이트 / 이메일 도메인</label><input value="${esc(c.site)}" onchange="CONFIG.brand.site=this.value;saveConfig()"></div>
-      <div class="field"><label>인쇄소 발주 이메일</label><input value="${esc(CONFIG.vendorEmail)}" onchange="CONFIG.vendorEmail=this.value;saveConfig()"></div>
-    </div></div>
-  <div class="cfg-card"><h3>명함 콘텐츠 (DEAR.CUS형 공통 항목)</h3><p class="d">앞면 서브카피·뒷면 태그라인·주소·QR은 전 직원 공통으로 명함에 들어갑니다. 로고는 첨부 logo.png에서 추출해 내장되어 있습니다.</p>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-      <div class="field"><label>앞면 서브카피 1행</label><input value="${esc(c.sub1||'')}" onchange="CONFIG.brand.sub1=this.value;saveConfig()"></div>
-      <div class="field"><label>앞면 서브카피 2행</label><input value="${esc(c.sub2||'')}" onchange="CONFIG.brand.sub2=this.value;saveConfig()"></div>
       <div class="field"><label>뒷면 국문 태그라인</label><input value="${esc(c.taglineKo||'')}" onchange="CONFIG.brand.taglineKo=this.value;saveConfig()"></div>
       <div class="field"><label>QR 이미지 교체 <span class="hint">첨부 QR 사용 중 · 파일 선택 시 교체</span></label><input type="file" accept="image/*" onchange="onQRUpload(this)"></div>
       <div class="field"><label>QR 링크 URL <span class="hint">이미지 없을 때 자동 생성</span></label><input value="${esc(c.qrUrl||'')}" onchange="CONFIG.brand.qrUrl=this.value;CONFIG.brand.qrImage='';refreshBrandQR().then(()=>{toast('QR을 링크로 재생성');renderAdmin&&renderAdmin()});saveConfig()"></div>
