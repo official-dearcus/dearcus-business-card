@@ -113,7 +113,7 @@
   /* 카드 전체 덮는 고정 아트워크(SVG) — 뒷면은 전체, 앞면은 하단 푸터 */
   .dc-fixed-svg{position:absolute;inset:0;width:100%;height:100%;display:block;pointer-events:none}
   /* === 정보면 동적 오버레이 (AI 원본 좌표를 cqw로 환산) === */
-  .dci-rule{position:absolute;left:6.13cqw;right:6.13cqw;height:1px;border:0;margin:0;background:currentColor;opacity:.75;z-index:1}
+  .dci-rule{position:absolute;left:6.13cqw;right:6.13cqw;height:1px;border:0;margin:0;background:#E1EDE7;opacity:1;z-index:1}
   .dci-text{position:absolute;line-height:1;z-index:1;white-space:nowrap}
   .dci-nameko {top:9.75cqw;left:6.13cqw;font-family:var(--sans); font-weight:700;font-size:3.00cqw;color:var(--card-ink)}
   .dci-teamko {top:13.87cqw;left:6.13cqw;font-family:var(--sans);font-weight:300;font-size:2.06cqw;color:var(--card-ink);opacity:.9}
@@ -331,17 +331,16 @@ function _blobToBase64(blob){
 }
 
 async function submitToBackend(application, pdfBlob){
-  if(!API_URL || String(API_URL).startsWith('__')) return null;   // 백엔드 미설정시 조용히 패스
-  const pdfBase64 = pdfBlob ? await _blobToBase64(pdfBlob) : '';
-  const r=await fetch(API_URL,{
-    method:'POST',
-    headers:{'Content-Type':'text/plain;charset=utf-8'},  // CORS preflight 회피
-    body:JSON.stringify({application, pdfBase64}),         // idToken 제거 (anonymous)
-    redirect:'follow'
+  if(!API_URL || String(API_URL).startsWith('__')) return null;
+  // JSONP는 GET이라 PDF blob(수MB) 전송 불가 → 메타데이터만 시트 적재
+  // PDF는 클라이언트에서 다운로드되므로 시트에 PDF링크 컬럼은 비어 있음
+  const params = ['action=submit'];
+  ['reason','nameKo','nameEn','team','role','mobile','email','type'].forEach(k => {
+    if(application[k] != null) params.push(k + '=' + encodeURIComponent(String(application[k])));
   });
-  const data=await r.json();
-  if(!data.ok) throw new Error('서버 오류: '+data.error);
-  return data;
+  const d = await jsonpGet(API_URL + '?' + params.join('&'));
+  if(!d || !d.ok) throw new Error('서버 응답 실패: ' + (d && d.error || 'unknown'));
+  return d;
 }
 
 /* ---------- 1. 한글 -> 로마자 자동 변환 ----------
@@ -513,8 +512,7 @@ async function boot(){
 async function fetchSheetConfigAndApply(){
   try{
     if(!API_URL || String(API_URL).startsWith('__')) return;
-    const r = await fetch(API_URL + '?action=config', { redirect:'follow' });
-    const d = await r.json();
+    const d = await jsonpGet(API_URL + '?action=config');
     if(d && d.ok && d.config && typeof d.config === 'object'){
       const c = d.config;
       if(c.teams) CONFIG.teams = c.teams;
@@ -522,10 +520,32 @@ async function fetchSheetConfigAndApply(){
       if(c.brand) CONFIG.brand = Object.assign({}, DEFAULT_CONFIG.brand, c.brand);
       if(c.design) CONFIG.design = Object.assign({}, DEFAULT_CONFIG.design, c.design);
       if(c.vendorEmail) CONFIG.vendorEmail = c.vendorEmail;
-      await store.set('config:main', CONFIG);  // 로컬 캐시도 갱신
+      await store.set('config:main', CONFIG);
       applyTheme(); await refreshBrandQR(); render();
+      console.log('[sync] ✓ 시트에서 설정 로드');
+    } else {
+      console.log('[sync] 시트에 설정 없음(로컬 캐시 사용)');
     }
-  }catch(e){ console.warn('시트 설정 fetch 실패(로컬 캐시 사용):', e); }
+  }catch(e){ console.warn('[sync] 시트 설정 fetch 실패:', e); }
+}
+/* ---------- JSONP 헬퍼 (Workspace 정책 우회) ---------- */
+let _jsonpN = 0;
+function jsonpGet(url){
+  return new Promise((resolve, reject) => {
+    const cb = '_jsonp_' + (++_jsonpN) + '_' + Date.now();
+    const sep = url.indexOf('?') >= 0 ? '&' : '?';
+    const script = document.createElement('script');
+    const timer = setTimeout(() => { cleanup(); reject(new Error('JSONP timeout')); }, 25000);
+    function cleanup(){
+      clearTimeout(timer);
+      try { delete window[cb]; } catch(_) { window[cb] = undefined; }
+      if(script.parentNode) script.parentNode.removeChild(script);
+    }
+    window[cb] = (data) => { cleanup(); resolve(data); };
+    script.onerror = () => { cleanup(); reject(new Error('JSONP load error')); };
+    script.src = url + sep + 'callback=' + cb;
+    document.head.appendChild(script);
+  });
 }
 function go(v){ state.view=v; if(v==='apply')state.step=0; render(); }
 function setNav(){ document.getElementById('navApply').classList.toggle('active',state.view==='apply');
@@ -843,14 +863,13 @@ async function submitApp(){
     await store.set('applications:'+id, rec);
     state._lastId=id; state._lastFileName=filename;
     state.step=4; render();
-    // 3) 백엔드(시트+드라이브) 비동기 동기화 — 실패해도 사용자 흐름엔 영향 X
+    // 3) 백엔드(시트) 비동기 동기화 — 메타데이터만 적재, 실패해도 사용자 흐름엔 영향 X
     (async()=>{
       try{
         if(btn) btn.textContent='시트 동기화 중…';
-        const pdfBlob=await buildPDF(rec,true);          // 고해상도 PDF (시트 아카이브용)
-        const result=await submitToBackend(rec, pdfBlob);
-        if(result && result.fileUrl){ rec.fileUrl=result.fileUrl; rec.folderUrl=result.folderUrl; await store.set('applications:'+id, rec); }
-      }catch(e){ console.warn('백엔드 동기화 실패:', e); }
+        await submitToBackend(rec, null);
+        console.log('[sync] ✓ 신청 메타데이터가 시트에 적재됨');
+      }catch(e){ console.warn('[sync] 시트 적재 실패:', e); }
     })();
   }catch(err){
     if(btn){btn.disabled=false;btn.textContent='이대로 신청 완료 →';}
@@ -906,13 +925,12 @@ let adminTab='dash';
 async function fetchSheetApplications(){
   try{
     if(!API_URL || String(API_URL).startsWith('__')) return null;
-    const r = await fetch(API_URL + '?action=applications', { redirect:'follow' });
-    const d = await r.json();
+    const d = await jsonpGet(API_URL + '?action=applications');
     if(d && d.ok && Array.isArray(d.list)){
       window._sheetRecs = d.list;
       return d.list;
     }
-  }catch(e){ console.warn('시트 신청목록 fetch 실패:', e); }
+  }catch(e){ console.warn('[sync] 시트 신청목록 fetch 실패:', e); }
   return null;
 }
 async function renderAdmin(){
@@ -1119,14 +1137,13 @@ async function saveConfig(){
 }
 async function pushSheetConfig(){
   try{
-    if(!API_URL || String(API_URL).startsWith('__')) return;
-    await fetch(API_URL, {
-      method:'POST',
-      headers:{'Content-Type':'text/plain;charset=utf-8'},
-      body: JSON.stringify({ action:'config', config: CONFIG }),
-      redirect:'follow'
-    });
-  }catch(e){ console.warn('시트 설정 push 실패:', e); }
+    if(!API_URL || String(API_URL).startsWith('__')){ console.warn('[sync] API_URL 미설정 — push 건너뜀'); return; }
+    console.log('[sync] 시트로 설정 push 중...');
+    const data = encodeURIComponent(JSON.stringify(CONFIG));
+    const d = await jsonpGet(API_URL + '?action=setConfig&data=' + data);
+    if(d && d.ok){ console.log('[sync] ✓ 시트 설정 저장 완료'); }
+    else { console.error('[sync] push 응답 실패:', d); }
+  }catch(e){ console.error('[sync] push 예외:', e); }
 }
 async function resetConfig(){ CONFIG=JSON.parse(JSON.stringify(DEFAULT_CONFIG)); await store.set('config:main',CONFIG);
   document.getElementById('brandName').textContent=CONFIG.brand.name; applyTheme(); renderAdmin(); toast('기본값으로 초기화했습니다'); }
