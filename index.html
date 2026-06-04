@@ -523,7 +523,8 @@ async function boot(){
 async function fetchSheetConfigAndApply(){
   try{
     if(!API_URL || String(API_URL).startsWith('__')) return;
-    const d = await jsonpGet(API_URL + '?action=config');
+    const r = await fetch(API_URL + '?action=config', { redirect: 'follow' });
+    const d = await r.json();
     if(d && d.ok && d.config && typeof d.config === 'object'){
       const c = d.config;
       if(c.teams) CONFIG.teams = c.teams;
@@ -657,16 +658,18 @@ async function captureSide(side, opts){
   if(opts.canvas) return canvas;
   return canvas.toDataURL(opts.format || 'image/png');
 }
-// 94x54mm 2면 PDF (front + back) — 인쇄소 전달용 최대 해상도
+// 94x54mm 2면 PDF (front + back) — 인쇄용 적정 해상도 (~580dpi, ~500KB-1MB)
 async function buildPDF(app, returnBlob){
   const prev=state.app; state.app=app;
-  const f=await captureSide('front', {W: 1620, scale: 6});   // 9720px @94mm ≈ 2620dpi
-  const b=await captureSide('back',  {W: 1620, scale: 6});
+  const cf=await captureSide('front', {W: 540, scale: 4, canvas: true});  // 2160px @94mm ≈ 583dpi
+  const cb=await captureSide('back',  {W: 540, scale: 4, canvas: true});
   state.app=prev;
+  const fJpg = cf.toDataURL('image/jpeg', 0.92);
+  const bJpg = cb.toDataURL('image/jpeg', 0.92);
   const {jsPDF}=window.jspdf;
   const doc=new jsPDF({orientation:'landscape',unit:'mm',format:[94,54]});
-  doc.addImage(f,'PNG',0,0,94,54,undefined,'NONE');           // 무압축 PNG (sharpness 우선)
-  if((app.type||'양면')==='양면'){ doc.addPage([94,54],'landscape'); doc.addImage(b,'PNG',0,0,94,54,undefined,'NONE'); }
+  doc.addImage(fJpg,'JPEG',0,0,94,54,undefined,'MEDIUM');
+  if((app.type||'양면')==='양면'){ doc.addPage([94,54],'landscape'); doc.addImage(bJpg,'JPEG',0,0,94,54,undefined,'MEDIUM'); }
   if(returnBlob) return doc.output('blob');
   return doc;
 }
@@ -944,7 +947,8 @@ let adminTab='dash';
 async function fetchSheetApplications(){
   try{
     if(!API_URL || String(API_URL).startsWith('__')) return null;
-    const d = await jsonpGet(API_URL + '?action=applications');
+    const r = await fetch(API_URL + '?action=applications', { redirect: 'follow' });
+    const d = await r.json();
     if(d && d.ok && Array.isArray(d.list)){
       window._sheetRecs = d.list;
       return d.list;
@@ -1157,8 +1161,13 @@ async function pushSheetConfig(){
   try{
     if(!API_URL || String(API_URL).startsWith('__')){ console.warn('[sync] API_URL 미설정 — push 건너뜀'); return; }
     console.log('[sync] 시트로 설정 push 중...');
-    const data = encodeURIComponent(JSON.stringify(CONFIG));
-    const d = await jsonpGet(API_URL + '?action=setConfig&data=' + data);
+    const r = await fetch(API_URL, {
+      method:'POST',
+      headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body: JSON.stringify({ action:'config', config: CONFIG }),
+      redirect:'follow'
+    });
+    const d = await r.json();
     if(d && d.ok){ console.log('[sync] ✓ 시트 설정 저장 완료'); }
     else { console.error('[sync] push 응답 실패:', d); }
   }catch(e){ console.error('[sync] push 예외:', e); }
