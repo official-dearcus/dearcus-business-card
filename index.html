@@ -332,13 +332,15 @@ function _blobToBase64(blob){
 
 async function submitToBackend(application, pdfBlob){
   if(!API_URL || String(API_URL).startsWith('__')) return null;
-  // JSONP는 GET이라 PDF blob(수MB) 전송 불가 → 메타데이터만 시트 적재
-  // PDF는 클라이언트에서 다운로드되므로 시트에 PDF링크 컬럼은 비어 있음
-  const params = ['action=submit'];
-  ['reason','nameKo','nameEn','team','role','mobile','email','type'].forEach(k => {
-    if(application[k] != null) params.push(k + '=' + encodeURIComponent(String(application[k])));
+  // "모든 사용자" 권한이라 fetch POST + PDF 전송 가능 (CORS OK)
+  const pdfBase64 = pdfBlob ? await _blobToBase64(pdfBlob) : '';
+  const r = await fetch(API_URL, {
+    method:'POST',
+    headers:{'Content-Type':'text/plain;charset=utf-8'},  // simple request — no preflight
+    body: JSON.stringify({ application, pdfBase64 }),
+    redirect:'follow'
   });
-  const d = await jsonpGet(API_URL + '?' + params.join('&'));
+  const d = await r.json();
   if(!d || !d.ok) throw new Error('서버 응답 실패: ' + (d && d.error || 'unknown'));
   return d;
 }
@@ -459,7 +461,7 @@ const DEFAULT_CONFIG = {
     address:'서울특별시 마포구 양화로 113, 순흥빌딩 8층' },
   vendorEmail:'print-vendor@example.com',
   design:{ fontBody:'Pretendard', fontDisplay:'Newsreader', utileUrl:'',
-    accent:'#043931', ink:'#043931', paper:'#E7E9E7', cardBg:'#043931', backBg:'#E7E9E7', layout:'dearcus' },
+    accent:'#043931', ink:'#043931', paper:'#f4f4f4', cardBg:'#043931', backBg:'#E7E9E7', layout:'dearcus' },
   teams:[
     {name:'커머스팀',   nameEn:'Commerce Team', leader:'팀장'},
     {name:'브랜드팀',   nameEn:'Brand Team',    leader:'팀장'},
@@ -490,6 +492,14 @@ const REASONS=[
 ];
 
 /* ---------- 4. 부트스트랩 ---------- */
+function migrateConfig(){
+  // 이전 버전에서 페이지 배경(paper)이 #E7E9E7(카드 뒷면과 동일)이었음 → 새 기본값 #f4f4f4로 마이그레이션
+  let changed = false;
+  if(CONFIG.design && (CONFIG.design.paper === '#E7E9E7' || CONFIG.design.paper === '#e7e9e7')){
+    CONFIG.design.paper = '#f4f4f4'; changed = true;
+  }
+  return changed;
+}
 async function boot(){
   // 1) 로컬 캐시로 초기 부팅 (즉시 화면)
   const saved = await store.get('config:main');
@@ -504,6 +514,7 @@ async function boot(){
     }
   }
   CONFIG._v = CONFIG_VERSION;
+  if(migrateConfig()) await store.set('config:main', CONFIG);   // 로컬 즉시 마이그레이션 반영
   document.getElementById('brandName').textContent = CONFIG.brand.name || '명함 스튜디오';
   applyTheme(); await refreshBrandQR(); render();
   // 2) 시트에서 최신 설정 fetch — 있으면 덮어쓰고 다시 렌더 (백그라운드)
@@ -520,9 +531,11 @@ async function fetchSheetConfigAndApply(){
       if(c.brand) CONFIG.brand = Object.assign({}, DEFAULT_CONFIG.brand, c.brand);
       if(c.design) CONFIG.design = Object.assign({}, DEFAULT_CONFIG.design, c.design);
       if(c.vendorEmail) CONFIG.vendorEmail = c.vendorEmail;
+      const migrated = migrateConfig();
       await store.set('config:main', CONFIG);
       applyTheme(); await refreshBrandQR(); render();
       console.log('[sync] ✓ 시트에서 설정 로드');
+      if(migrated){ console.log('[sync] paper 마이그레이션 적용 → 시트에 푸시'); pushSheetConfig(); }
     } else {
       console.log('[sync] 시트에 설정 없음(로컬 캐시 사용)');
     }
@@ -697,7 +710,7 @@ function screenLanding(){
     <div style="display:grid;grid-template-columns:1.05fr .95fr;gap:60px;align-items:center">
       <div>
         <div class="eyebrow">Make your own card</div>
-        <h1 class="title" style="font-family:var(--sans);font-weight:500;font-style:normal">디어커스 명함 만들기</h1>
+        <h1 class="title" style="font-family:var(--sans);font-weight:500;font-style:normal">디어커스 명함 신청</h1>
         <p class="sub">사회에 나와 처음 명함을 받던 그 설렘을 기억하시나요. 1분이면 충분합니다. 이름과 연락처만 알려주시면, 나머지는 저희가 자동으로 채워 인쇄까지 정확하게 이어드릴게요.</p>
         <div class="actions">
           <button class="btn btn-primary" onclick="state.step=1;render()">명함 만들기 시작 →</button>
@@ -863,13 +876,19 @@ async function submitApp(){
     await store.set('applications:'+id, rec);
     state._lastId=id; state._lastFileName=filename;
     state.step=4; render();
-    // 3) 백엔드(시트) 비동기 동기화 — 메타데이터만 적재, 실패해도 사용자 흐름엔 영향 X
+    // 3) 백엔드(시트+드라이브) 비동기 동기화 — 실패해도 사용자 흐름엔 영향 X
     (async()=>{
       try{
-        if(btn) btn.textContent='시트 동기화 중…';
-        await submitToBackend(rec, null);
-        console.log('[sync] ✓ 신청 메타데이터가 시트에 적재됨');
-      }catch(e){ console.warn('[sync] 시트 적재 실패:', e); }
+        if(btn) btn.textContent='시트+드라이브 동기화 중…';
+        const pdfBlob = await buildPDF(rec, true);     // 양면 PDF (Drive 아카이브용)
+        const result = await submitToBackend(rec, pdfBlob);
+        if(result && result.fileUrl){
+          rec.fileUrl = result.fileUrl;
+          rec.folderUrl = result.folderUrl;
+          await store.set('applications:'+id, rec);
+        }
+        console.log('[sync] ✓ 시트+드라이브 동기화 완료', result);
+      }catch(e){ console.warn('[sync] 시트/드라이브 동기화 실패:', e); }
     })();
   }catch(err){
     if(btn){btn.disabled=false;btn.textContent='이대로 신청 완료 →';}
@@ -1098,9 +1117,8 @@ function adminConfig(){
     <input value="${esc(ko)}" onchange="setRole(${i},'ko',this.value)" placeholder="직책(국문)">
     <input value="${esc(en)}" onchange="setRole(${i},'en',this.value)" placeholder="영문 직함 (예: Detail Innovator)">
     <button class="icon-btn" onclick="rmRole(${i})">🗑</button></div>`;}).join('');
-  return `<div class="cfg-card"><h3>명함 콘텐츠 (DEAR.CUS형 공통 항목)</h3><p class="d">뒷면 태그라인·주소·QR은 전 직원 공통으로 명함에 들어갑니다. 앞면 하단의 로고/태그라인/QR은 벡터 SVG로 임베드되어 있어 별도 설정이 필요 없습니다.</p>
+  return `<div class="cfg-card"><h3>명함 콘텐츠 (DEAR.CUS형 공통 항목)</h3><p class="d">주소·QR은 전 직원 공통으로 명함에 들어갑니다. 앞면 하단의 로고/태그라인/QR은 벡터 SVG로 임베드되어 있어 별도 설정이 필요 없습니다.</p>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-      <div class="field"><label>뒷면 국문 태그라인</label><input value="${esc(c.taglineKo||'')}" onchange="CONFIG.brand.taglineKo=this.value;saveConfig()"></div>
       <div class="field"><label>QR 이미지 교체 <span class="hint">첨부 QR 사용 중 · 파일 선택 시 교체</span></label><input type="file" accept="image/*" onchange="onQRUpload(this)"></div>
       <div class="field"><label>QR 링크 URL <span class="hint">이미지 없을 때 자동 생성</span></label><input value="${esc(c.qrUrl||'')}" onchange="CONFIG.brand.qrUrl=this.value;CONFIG.brand.qrImage='';refreshBrandQR().then(()=>{toast('QR을 링크로 재생성');renderAdmin&&renderAdmin()});saveConfig()"></div>
       <div class="field"><label>영문 주소 <span class="hint">줄바꿈은 \\n</span></label><input value="${esc((c.addrEn||'').replace(/\n/g,'\\n'))}" onchange="CONFIG.brand.addrEn=this.value.replace(/\\\\n/g,String.fromCharCode(10));saveConfig()"></div>
