@@ -1311,11 +1311,17 @@ boot();
     return bs;
   }
   function svgEl(str){ var d=new DOMParser().parseFromString(str,"image/svg+xml"); return d.documentElement; }
+  function getSvgFn(doc){
+    if(window.svg2pdf && typeof window.svg2pdf.svg2pdf==="function") return window.svg2pdf.svg2pdf;
+    if(typeof window.svg2pdf==="function") return window.svg2pdf;
+    if(doc && typeof doc.svg==="function") return function(el,d,opt){ return d.svg(el,opt); };
+    return null;
+  }
   function renderSVG(doc, str){
     var el = svgEl(str); el.setAttribute("style","position:absolute;left:-99999px;top:0"); document.body.appendChild(el);
-    var p = (typeof doc.svg==="function") ? doc.svg(el,{x:0,y:0,width:94,height:54})
-                                          : window.svg2pdf(el, doc, {x:0,y:0,width:94,height:54});
-    return Promise.resolve(p).then(function(){ try{el.remove();}catch(e){} });
+    var fn = getSvgFn(doc);
+    if(!fn){ try{el.remove();}catch(e){} return Promise.reject(new Error("svg2pdf missing")); }
+    return Promise.resolve(fn(el, doc, {x:0,y:0,width:94,height:54})).then(function(){ try{el.remove();}catch(e){} });
   }
   // 생성된 PDF 콘텐츠 스트림의 RGB 칠 → CMYK 치환 (딥그린/배경/흰색)
   function cmykPatch(doc){
@@ -1335,8 +1341,9 @@ boot();
   // 메인: 벡터+CMYK jsPDF doc 생성
   window.buildVectorDoc = function(a){
     var jsPDF = (window.jspdf||{}).jsPDF;
-    if(!jsPDF || !window.opentype) return Promise.reject(new Error("libs missing"));
-    if(typeof (jsPDF.prototype.svg)!=="function" && typeof window.svg2pdf!=="function") return Promise.reject(new Error("svg2pdf missing"));
+    if(!jsPDF || !window.opentype) return Promise.reject(new Error("libs missing (opentype/jspdf)"));
+    var hasSvg = (window.svg2pdf && typeof window.svg2pdf.svg2pdf==="function") || (typeof window.svg2pdf==="function") || (jsPDF.API && typeof jsPDF.API.svg==="function");
+    if(!hasSvg) return Promise.reject(new Error("svg2pdf missing"));
     var doc = new jsPDF({orientation:"landscape",unit:"mm",format:[94,54],compress:false});
     return frontSVG(a).then(function(fs){ return renderSVG(doc, fs); }).then(function(){
       if((a.type||"양면")==="양면"){ doc.addPage([94,54],"landscape"); return renderSVG(doc, backSVG()); }
@@ -1345,8 +1352,11 @@ boot();
   // 진단: 콘솔에서 dcVectorTest() 실행 → 성공 시 PDF 저장, 실패 시 정확한 에러 출력
   window.dcVectorTest = function(){
     try{
-      console.log("opentype:", !!window.opentype, "| jspdf:", !!(window.jspdf&&window.jspdf.jsPDF),
-                  "| svg2pdf(API.svg):", !!(window.jspdf&&window.jspdf.jsPDF&&typeof window.jspdf.jsPDF.API.svg==="function"));
+      console.log("opentype:", !!window.opentype,
+                  "| jspdf:", !!(window.jspdf&&window.jspdf.jsPDF),
+                  "| svg2pdf.svg2pdf:", !!(window.svg2pdf&&typeof window.svg2pdf.svg2pdf==="function"),
+                  "| svg2pdf(typeof):", typeof window.svg2pdf,
+                  "| API.svg:", !!(window.jspdf&&window.jspdf.jsPDF&&window.jspdf.jsPDF.API&&typeof window.jspdf.jsPDF.API.svg==="function"));
     }catch(e){ console.error("환경 체크 에러:", e); }
     var a={nameKo:"배민한",nameEn:"Ben",team:((CONFIG.teams||[])[0]||{}).name,role:(function(){var r=(CONFIG.roles||[])[0];return r?(typeof r==="string"?r:r.ko):"";})(),mobile:"010.6864.6438",email:"ben@dearcus.com",type:"양면"};
     return window.buildVectorDoc(a).then(function(doc){ doc.save("vector_test.pdf"); console.log("✅ 벡터 생성 성공 → vector_test.pdf 다운로드됨"); })
