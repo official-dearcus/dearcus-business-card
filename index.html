@@ -590,7 +590,7 @@ function jsonpGet(url){
     document.head.appendChild(script);
   });
 }
-function go(v){ state.view=v; if(v==='apply')state.step=0; render(); }
+function go(v){ state.view=v; if(v==='apply'){state.step=0;state.pickHistory=false;} render(); }
 function setNav(){ document.getElementById('navApply').classList.toggle('active',state.view==='apply');
   document.getElementById('navAdmin').classList.toggle('active',state.view==='admin'); }
 function toast(msg){ const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove('show'),2600); }
@@ -635,12 +635,19 @@ function dcLogoHTML(){
   const bs = (CONFIG.brand.backFixed || window.BACK_SVG || '');
   return `<div class="pc dcb dc-logoside">${bs}</div>`;
 }
+/* 직책 표기 매핑 — 국문 팀 라인 옆에 표기 (4개는 영문 약어, 나머지는 한글 직책명 그대로) */
+window.roleAbbr = function(ko){
+  if(!ko) return '';
+  return ({'디테일 이노베이터':'D.I.','브랜드 디렉터':'DBD','최고경영전략책임자':'CSO','최고경영자':'CEO'})[ko] || ko;
+};
 /* 앞면(정보면): 하단 푸터(SVG, 로고/태그/QR) + 절대배치 동적 텍스트(이름/팀/연락처) */
 function dcInfoHTML(a){
   const c=CONFIG.brand;
   const teamEn=(CONFIG.teams.find(t=>t.name===a.team)||{}).nameEn||'';
   const roleEn=(()=>{ const r=(CONFIG.roles||[]).find(x=>(typeof x==='string'?x:x.ko)===a.role); return r?(typeof r==='string'?'':r.en):''; })();
   const titleEn=[teamEn,roleEn].filter(Boolean).join(' ');
+  const ab=window.roleAbbr(a.role);
+  const teamKoDisp=(a.team||'')+(ab?(' '+ab):'');
   const tel=(a.mobile||'').replace(/-/g,'.');
   // EN 주소를 \n 기준 1·2번째 줄로 분할
   const addrEnLines=(c.addrEn||'').split(/\r?\n/);
@@ -650,7 +657,7 @@ function dcInfoHTML(a){
   return `<div class="pc dc-infoside">${ff}
     <hr class="dci-rule" style="top:6.95cqw">
     <div class="dci-text dci-nameko">${esc(a.nameKo)||'배민한'}</div>
-    <div class="dci-text dci-teamko">${esc(a.team)||'커머스팀'}</div>
+    <div class="dci-text dci-teamko">${esc(teamKoDisp)||'커머스팀'}</div>
     <div class="dci-text dci-nameen">${esc(a.nameEn)||'Ben'}</div>
     <div class="dci-text dci-titleen">${esc(titleEn)||'Commerce Team'}</div>
     <hr class="dci-rule" style="top:20.59cqw">
@@ -736,7 +743,7 @@ function renderApply(){
   const bar=`<div class="stepbar">${[1,2,3,4].map(i=>{
     const cls=i<state.step?'done':(i===state.step?'cur':''); return `<div class="seg ${cls}"></div>`;}).join('')}</div>`;
   let body='';
-  if(state.step===1) body=screenReason();
+  if(state.step===1) body = state.pickHistory ? screenHistory() : screenReason();
   if(state.step===2) body=screenInfo();
   if(state.step===3) body=screenReview();
   if(state.step===4) body=screenDone();
@@ -751,7 +758,7 @@ function screenLanding(){
       <div>
         <div class="eyebrow">Make your own card</div>
         <h1 class="title" style="font-family:var(--sans);font-weight:500;font-style:normal">디어커스 명함 신청</h1>
-        <p class="sub">사회에 나와 처음 명함을 받던 그 설렘을 기억하시나요. 1분이면 충분합니다. 이름과 연락처만 알려주시면, 나머지는 저희가 자동으로 채워 인쇄까지 정확하게 이어드릴게요.</p>
+        <p class="sub"></p>
         <div class="actions">
           <button class="btn btn-primary" onclick="state.step=1;render()">명함 만들기 시작 →</button>
         </div>
@@ -766,12 +773,51 @@ function screenLanding(){
 
 function screenReason(){
   const a=state.app;
-  const rs=REASONS.map((r,i)=>`<button class="choice ${i===0?'choice-wide':''} ${a.reason===r.k?'sel':''}" onclick="state.app.reason='${r.k}';state.step=2;render()">
+  const rs=REASONS.map((r,i)=>`<button class="choice ${i===0?'choice-wide':''} ${a.reason===r.k?'sel':''}" onclick="chooseReason('${r.k}')">
     <div class="nm">${r.k}</div><div class="ds">${r.d}</div></button>`).join('');
   return `<div class="eyebrow">Step 1</div><h1 class="title" style="font-size:34px">어떤 명함이 필요하세요?</h1>
     <div style="margin-top:34px"><label style="font-size:13px;font-weight:600;display:block;margin-bottom:12px">신청 사유를 선택해 주세요</label>
       <div class="choice-grid">${rs}</div></div>
     <div class="actions"><button class="btn btn-ghost" onclick="state.step=0;render()">← 이전</button></div>`;
+}
+// 신규 입사 → 빈 폼 / 정보 변경·추가 인쇄 → 이전 신청 이력에서 선택(B안)
+async function chooseReason(k){
+  state.app.reason=k;
+  if(k==='신규 입사'){ state.pickHistory=false; state.step=2; render(); return; }
+  state.pickHistory=true; state._histRecs=null; render();           // 로딩 표시
+  let recs = await fetchSheetApplications();
+  if(!recs){ recs = (await store.list('applications:')); }
+  const _del = await getDeletedSet();
+  recs = (recs||[]).filter(r=> !_del.has(String(r.id)));
+  state._histRecs = recs.sort((x,y)=>String(y.createdAt||'').localeCompare(String(x.createdAt||'')));
+  if(state.pickHistory) render();
+}
+function screenHistory(){
+  const recs=state._histRecs;
+  const back=`<div class="actions"><button class="btn btn-ghost" onclick="state.pickHistory=false;render()">← 사유 다시 선택</button></div>`;
+  const head=`<div class="eyebrow">Step 1</div><h1 class="title" style="font-size:30px">이전 신청 이력에서 선택</h1>
+    <p class="sub">${esc(state.app.reason)} — 기존 신청을 고르면 정보가 자동으로 채워져요. 바뀐 부분만 수정하면 됩니다.</p>`;
+  if(recs===null||recs===undefined) return head+`<p class="sub" style="margin-top:20px">불러오는 중…</p>`+back;
+  if(!recs.length) return head+`<div class="empty" style="margin-top:18px">이전 신청 이력이 없습니다.<br>
+    <button class="btn btn-primary" style="margin-top:14px" onclick="state.pickHistory=false;state.step=2;render()">새로 입력 →</button></div>`+back;
+  const list=recs.map(r=>`<button class="choice histitem" data-k="${esc((r.nameKo||'')+(r.nameEn||'')+(r.team||'')+(r.role||''))}" onclick="useHistory('${esc(r.id)}')">
+      <div class="nm">${esc(r.nameKo)} <span style="font-weight:400;opacity:.7">${esc(r.nameEn||'')}</span></div>
+      <div class="ds">${esc(r.team)} · ${esc(r.role)} · ${esc((r.createdAt||'').slice(0,10))}</div></button>`).join('');
+  return head+`<div class="field" style="margin:18px 0 6px"><input id="histSearch" placeholder="이름·팀으로 검색" oninput="filterHist(this.value)"></div>
+    <div class="choice-grid" id="histList">${list}</div>`+back;
+}
+function filterHist(q){
+  q=(q||'').toLowerCase().replace(/\s/g,'');
+  document.querySelectorAll('#histList .histitem').forEach(el=>{
+    const k=(el.getAttribute('data-k')||'').toLowerCase().replace(/\s/g,'');
+    el.style.display = (!q || k.indexOf(q)>=0) ? '' : 'none';
+  });
+}
+function useHistory(id){
+  const r=(state._histRecs||[]).find(x=>String(x.id)===String(id)); if(!r) return;
+  const reason=state.app.reason;
+  state.app={ reason, type:r.type||'양면', nameKo:r.nameKo||'', nameEn:r.nameEn||'', team:r.team||'', role:r.role||'', mobile:r.mobile||'', email:r.email||'', ext:r.ext||'' };
+  state.pickHistory=false; state.step=2; render();
 }
 
 function screenInfo(){
@@ -957,7 +1003,7 @@ function screenDone(){
     </div>
   </div></div>`;
 }
-function resetApply(){ state.app={ reason:'', type:'양면', nameKo:'', nameEn:'', team:'', role:'', mobile:'', email:'', ext:'' }; state.step=0; state.side='front'; render(); }
+function resetApply(){ state.app={ reason:'', type:'양면', nameKo:'', nameEn:'', team:'', role:'', mobile:'', email:'', ext:'' }; state.step=0; state.pickHistory=false; state.side='front'; render(); }
 
 // downloadPDF/JPG: 로컬 캐시 우선, 없으면 시트 캐시(_sheetRecs)에서 찾기
 async function _getRec(id){
@@ -998,6 +1044,8 @@ async function renderAdmin(){
   // 시트 우선, 실패시 로컬 캐시
   let recs = await fetchSheetApplications();
   if(!recs){ recs = (await store.list('applications:')); }
+  const _del = await getDeletedSet();
+  recs = recs.filter(r=> !_del.has(String(r.id)));
   recs = recs.sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
   const tabs=`<div class="tabs">
     ${['dash:대시보드','print:인쇄 발주','design:디자인','config:팀·브랜드 설정'].map(t=>{const[k,l]=t.split(':');
@@ -1026,19 +1074,39 @@ function adminDash(recs){
     ${stat(total,'누적 신청')}${stat(thisMonth,'이번 달')}${stat(pending,'발주 대기')}${stat(teams,'신청 팀 수')}</div>`;
   if(!recs.length) return stats+`<div class="empty">아직 신청 내역이 없습니다.<br><button class="btn btn-ghost" style="margin-top:16px" onclick="go('apply')">명함 만들기로 이동</button></div>`;
   const rows=recs.map(r=>`<tr>
+    <td><input type="checkbox" class="checkmini dashsel" value="${esc(r.id)}"></td>
     <td>${r.createdAt.slice(0,10)}</td><td><b>${esc(r.nameKo)}</b><div class="mini">${esc(r.nameEn)}</div></td>
     <td>${esc(r.team)}</td><td>${esc(r.role)}</td><td>${esc(r.reason)}</td>
     <td><span class="pill">${esc(r.status)}</span></td>
     <td class="row-flex"><button class="icon-btn" title="PDF (양면)" onclick="downloadPDF('${r.id}')">📄</button>
       <button class="icon-btn" title="JPG (앞면)" onclick="downloadJPG('${r.id}')">🖼</button>
       <button class="icon-btn" title="삭제" onclick="delRec('${r.id}')">🗑</button></td></tr>`).join('');
-  return stats+`<div class="row-flex" style="justify-content:flex-end;margin-bottom:14px">
+  return stats+`<div class="row-flex" style="justify-content:flex-end;margin-bottom:14px;gap:8px">
+      <button class="btn btn-ghost" onclick="delSelected()">🗑 선택 삭제</button>
       <button class="btn btn-ghost" onclick="exportCSV()">⤓ CSV 내보내기</button></div>
-    <table><thead><tr><th>신청일</th><th>이름</th><th>팀</th><th>직책</th><th>사유</th><th>상태</th><th>작업</th></tr></thead>
+    <table><thead><tr>
+      <th style="width:34px"><input type="checkbox" class="checkmini" onclick="document.querySelectorAll('.dashsel').forEach(c=>c.checked=this.checked)"></th>
+      <th>신청일</th><th>이름</th><th>팀</th><th>직책</th><th>사유</th><th>상태</th><th>작업</th></tr></thead>
     <tbody>${rows}</tbody></table>`;
 }
 function stat(n,l){return `<div class="stat"><div class="n">${n}</div><div class="l">${l}</div></div>`;}
-async function delRec(id){ await store.del('applications:'+id); toast('삭제되었습니다'); renderAdmin(); }
+// 시트는 건드리지 않고, 삭제한 id를 로컬에 기억해 관리자 목록에서 숨김 처리
+async function getDeletedSet(){ const d=await store.get('meta:deletedIds'); return new Set(Array.isArray(d)?d.map(String):[]); }
+async function addDeleted(ids){ const s=await getDeletedSet(); ids.forEach(i=>s.add(String(i))); await store.set('meta:deletedIds',[...s]); }
+async function delRec(id){
+  if(!confirm('이 신청 기록을 목록에서 삭제할까요?')) return;
+  await store.del('applications:'+id);
+  await addDeleted([id]);
+  toast('삭제되었습니다'); renderAdmin();
+}
+async function delSelected(){
+  const ids=[...document.querySelectorAll('.dashsel:checked')].map(c=>c.value);
+  if(!ids.length){ toast('선택된 항목이 없습니다'); return; }
+  if(!confirm(ids.length+'건을 목록에서 삭제할까요?')) return;
+  for(const id of ids){ await store.del('applications:'+id); }
+  await addDeleted(ids);
+  toast(ids.length+'건 삭제되었습니다'); renderAdmin();
+}
 async function exportCSV(){
   const recs=(await store.list('applications:')).sort((a,b)=>a.createdAt.localeCompare(b.createdAt));
   const head=['신청일','국문이름','영문이름','팀','직책','사유','타입','휴대전화','이메일','내선','상태'];
@@ -1273,7 +1341,7 @@ boot();
       els.push('<rect width="266.46" height="153.07" fill="'+((CONFIG.design&&CONFIG.design.cardBg)||"#043931")+'"/>');
       [6.95,20.59].forEach(function(top){ els.push('<rect x="'+(6.13*U).toFixed(2)+'" y="'+(top*U).toFixed(2)+'" width="'+((100-12.26)*U).toFixed(2)+'" height="0.5" fill="#FFFFFF"/>'); });
       T(els,6.13,9.75, KO[700],FB, 3.00, a.nameKo||"배민한");
-      T(els,6.13,13.87,KO[300],FB, 2.06, a.team||"");
+      T(els,6.13,13.87,KO[300],FB, 2.06, (a.team||"")+((window.roleAbbr&&window.roleAbbr(a.role))?(" "+window.roleAbbr(a.role)):""));
       T(els,27.85,9.56, EN[500],KO[400], 3.00, a.nameEn||"");
       T(els,27.85,13.51,EN[400],KO[400], 2.44, titleEn);
       T(els,6.13,22.90, EN[400],KO[400], 2.44, "Tel.");    T(els,27.85,22.90, EN[400],KO[400], 2.44, tel);
