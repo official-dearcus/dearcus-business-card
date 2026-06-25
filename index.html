@@ -787,7 +787,8 @@ async function chooseReason(k){
   state.pickHistory=true; state._histRecs=null; render();           // 로딩 표시
   let recs = await fetchSheetApplications();
   if(!recs){ recs = (await store.list('applications:')); }
-  state._histRecs = (recs||[]).sort((x,y)=>String(y.createdAt||'').localeCompare(String(x.createdAt||'')));
+  const _del = await getDeletedSet();
+  state._histRecs = (recs||[]).filter(r=> !_del.has(String(r.id))).sort((x,y)=>String(y.createdAt||'').localeCompare(String(x.createdAt||'')));
   if(state.pickHistory) render();
 }
 function screenHistory(){
@@ -1042,6 +1043,8 @@ async function renderAdmin(){
   // 시트 우선, 실패시 로컬 캐시
   let recs = await fetchSheetApplications();
   if(!recs){ recs = (await store.list('applications:')); }
+  const _del = await getDeletedSet();
+  recs = recs.filter(r=> !_del.has(String(r.id)));
   recs = recs.sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
   const tabs=`<div class="tabs">
     ${['dash:대시보드','print:인쇄 발주','design:디자인','config:팀·브랜드 설정'].map(t=>{const[k,l]=t.split(':');
@@ -1087,8 +1090,10 @@ function adminDash(recs){
     <tbody>${rows}</tbody></table>`;
 }
 function stat(n,l){return `<div class="stat"><div class="n">${n}</div><div class="l">${l}</div></div>`;}
-// 삭제: 시트의 행 번호(id='sheet_N')로 정확히 삭제 — 헤더/내용 매칭 불필요
+// 삭제: ① 로컬 즉시 숨김(이 브라우저, 백엔드 없어도 바로 사라짐) + ② 시트 행 삭제(전역)
 function rowOf(r){ var m=String(r&&r.id||'').match(/^sheet_(\d+)$/); return m?+m[1]:null; }
+async function getDeletedSet(){ const d=await store.get('meta:deletedIds'); return new Set(Array.isArray(d)?d.map(String):[]); }
+async function addDeletedIds(ids){ const s=await getDeletedSet(); ids.forEach(i=>s.add(String(i))); await store.set('meta:deletedIds',[...s]); }
 async function deleteFromBackend(rows){
   if(!API_URL || String(API_URL).startsWith('__')) return {ok:false};
   try{
@@ -1100,22 +1105,19 @@ async function deleteFromBackend(rows){
 async function delRec(i){
   const r=(window._adminRecs||[])[i]; if(!r) return;
   if(!confirm('이 신청 기록을 삭제할까요?')) return;
-  const row=rowOf(r);
-  if(!row){ toast('이 기록은 시트에서 삭제할 수 없어요(행 정보 없음)'); return; }
-  toast('삭제 중…');
-  await deleteFromBackend([row]);
-  renderAdmin();
+  await addDeletedIds([r.id]);                          // 즉시 숨김
+  const row=rowOf(r); if(row) deleteFromBackend([row]); // 시트 삭제(백그라운드)
+  toast('삭제되었습니다'); renderAdmin();
 }
 async function delSelected(){
   const idx=[...document.querySelectorAll('.dashsel:checked')].map(c=>+c.value);
   if(!idx.length){ toast('선택된 항목이 없습니다'); return; }
   if(!confirm(idx.length+'건을 삭제할까요?')) return;
-  const recs=window._adminRecs||[], rows=[];
-  for(const i of idx){ const row=rowOf(recs[i]); if(row) rows.push(row); }
-  if(!rows.length){ toast('삭제할 수 있는 항목이 없습니다'); return; }
-  toast('삭제 중…');
-  await deleteFromBackend(rows);
-  renderAdmin();
+  const recs=window._adminRecs||[], ids=[], rows=[];
+  for(const i of idx){ const r=recs[i]; if(!r)continue; ids.push(r.id); const row=rowOf(r); if(row)rows.push(row); }
+  await addDeletedIds(ids);
+  if(rows.length) deleteFromBackend(rows);
+  toast(ids.length+'건 삭제되었습니다'); renderAdmin();
 }
 async function exportCSV(){
   const recs=(await store.list('applications:')).sort((a,b)=>a.createdAt.localeCompare(b.createdAt));
