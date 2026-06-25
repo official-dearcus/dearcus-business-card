@@ -1092,9 +1092,9 @@ function rowOf(r){ var m=String(r&&r.id||'').match(/^sheet_(\d+)$/); return m?+m
 async function deleteFromBackend(rows){
   if(!API_URL || String(API_URL).startsWith('__')) return {ok:false};
   try{
-    const res = await fetch(API_URL, {method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'},
-      body: JSON.stringify({ action:'delete', rows }), redirect:'follow'});
-    try{ return await res.json(); }catch(_){ return {ok:true}; }
+    const url = API_URL + '?action=delete&rows=' + encodeURIComponent(JSON.stringify(rows)) + '&_=' + Date.now();
+    const res = await fetch(url, {redirect:'follow'});
+    try{ const d = await res.json(); console.log('[sync] 삭제 결과:', d); return d; }catch(_){ return {ok:true}; }
   }catch(e){ console.warn('[sync] 시트 삭제 실패:', e); return {ok:false}; }
 }
 async function delRec(i){
