@@ -788,7 +788,7 @@ async function chooseReason(k){
   let recs = await fetchSheetApplications();
   if(!recs){ recs = (await store.list('applications:')); }
   const _del = await getDeletedSet();
-  recs = (recs||[]).filter(r=> !_del.has(String(r.id)));
+  recs = (recs||[]).filter(r=> !_del.has(recKey(r)));
   state._histRecs = recs.sort((x,y)=>String(y.createdAt||'').localeCompare(String(x.createdAt||'')));
   if(state.pickHistory) render();
 }
@@ -1045,7 +1045,7 @@ async function renderAdmin(){
   let recs = await fetchSheetApplications();
   if(!recs){ recs = (await store.list('applications:')); }
   const _del = await getDeletedSet();
-  recs = recs.filter(r=> !_del.has(String(r.id)));
+  recs = recs.filter(r=> !_del.has(recKey(r)));
   recs = recs.sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
   const tabs=`<div class="tabs">
     ${['dash:대시보드','print:인쇄 발주','design:디자인','config:팀·브랜드 설정'].map(t=>{const[k,l]=t.split(':');
@@ -1065,6 +1065,7 @@ async function renderAdmin(){
 }
 
 function adminDash(recs){
+  window._adminRecs = recs;
   const total=recs.length;
   const ym=new Date().getFullYear()+'-'+String(new Date().getMonth()+1).padStart(2,'0');
   const thisMonth=recs.filter(r=>r.ym===ym).length;
@@ -1073,14 +1074,14 @@ function adminDash(recs){
   const stats=`<div class="stat-grid">
     ${stat(total,'누적 신청')}${stat(thisMonth,'이번 달')}${stat(pending,'발주 대기')}${stat(teams,'신청 팀 수')}</div>`;
   if(!recs.length) return stats+`<div class="empty">아직 신청 내역이 없습니다.<br><button class="btn btn-ghost" style="margin-top:16px" onclick="go('apply')">명함 만들기로 이동</button></div>`;
-  const rows=recs.map(r=>`<tr>
-    <td><input type="checkbox" class="checkmini dashsel" value="${esc(r.id)}"></td>
-    <td>${r.createdAt.slice(0,10)}</td><td><b>${esc(r.nameKo)}</b><div class="mini">${esc(r.nameEn)}</div></td>
+  const rows=recs.map((r,i)=>`<tr>
+    <td><input type="checkbox" class="checkmini dashsel" value="${i}"></td>
+    <td>${(r.createdAt||'').slice(0,10)}</td><td><b>${esc(r.nameKo)}</b><div class="mini">${esc(r.nameEn)}</div></td>
     <td>${esc(r.team)}</td><td>${esc(r.role)}</td><td>${esc(r.reason)}</td>
     <td><span class="pill">${esc(r.status)}</span></td>
     <td class="row-flex"><button class="icon-btn" title="PDF (양면)" onclick="downloadPDF('${r.id}')">📄</button>
       <button class="icon-btn" title="JPG (앞면)" onclick="downloadJPG('${r.id}')">🖼</button>
-      <button class="icon-btn" title="삭제" onclick="delRec('${r.id}')">🗑</button></td></tr>`).join('');
+      <button class="icon-btn" title="삭제" onclick="delRec(${i})">🗑</button></td></tr>`).join('');
   return stats+`<div class="row-flex" style="justify-content:flex-end;margin-bottom:14px;gap:8px">
       <button class="btn btn-ghost" onclick="delSelected()">🗑 선택 삭제</button>
       <button class="btn btn-ghost" onclick="exportCSV()">⤓ CSV 내보내기</button></div>
@@ -1090,22 +1091,25 @@ function adminDash(recs){
     <tbody>${rows}</tbody></table>`;
 }
 function stat(n,l){return `<div class="stat"><div class="n">${n}</div><div class="l">${l}</div></div>`;}
-// 시트는 건드리지 않고, 삭제한 id를 로컬에 기억해 관리자 목록에서 숨김 처리
-async function getDeletedSet(){ const d=await store.get('meta:deletedIds'); return new Set(Array.isArray(d)?d.map(String):[]); }
-async function addDeleted(ids){ const s=await getDeletedSet(); ids.forEach(i=>s.add(String(i))); await store.set('meta:deletedIds',[...s]); }
-async function delRec(id){
+// 삭제는 시트를 건드리지 않고, "내용 기반 키"를 로컬에 기억해 목록에서 영구 숨김 (재조회/기기무관 유지)
+function recKey(r){ return [r.nameKo||'', r.nameEn||'', r.team||'', r.role||'', r.mobile||'', r.email||''].join('|'); }
+async function getDeletedSet(){ const d=await store.get('meta:deletedKeys'); return new Set(Array.isArray(d)?d.map(String):[]); }
+async function addDeletedKeys(keys){ const s=await getDeletedSet(); keys.forEach(k=>s.add(String(k))); await store.set('meta:deletedKeys',[...s]); }
+async function delRec(i){
+  const r=(window._adminRecs||[])[i]; if(!r) return;
   if(!confirm('이 신청 기록을 목록에서 삭제할까요?')) return;
-  await store.del('applications:'+id);
-  await addDeleted([id]);
+  if(r.id) await store.del('applications:'+r.id);
+  await addDeletedKeys([recKey(r)]);
   toast('삭제되었습니다'); renderAdmin();
 }
 async function delSelected(){
-  const ids=[...document.querySelectorAll('.dashsel:checked')].map(c=>c.value);
-  if(!ids.length){ toast('선택된 항목이 없습니다'); return; }
-  if(!confirm(ids.length+'건을 목록에서 삭제할까요?')) return;
-  for(const id of ids){ await store.del('applications:'+id); }
-  await addDeleted(ids);
-  toast(ids.length+'건 삭제되었습니다'); renderAdmin();
+  const idx=[...document.querySelectorAll('.dashsel:checked')].map(c=>+c.value);
+  if(!idx.length){ toast('선택된 항목이 없습니다'); return; }
+  if(!confirm(idx.length+'건을 목록에서 삭제할까요?')) return;
+  const recs=window._adminRecs||[], keys=[];
+  for(const i of idx){ const r=recs[i]; if(!r)continue; keys.push(recKey(r)); if(r.id) await store.del('applications:'+r.id); }
+  await addDeletedKeys(keys);
+  toast(keys.length+'건 삭제되었습니다'); renderAdmin();
 }
 async function exportCSV(){
   const recs=(await store.list('applications:')).sort((a,b)=>a.createdAt.localeCompare(b.createdAt));
