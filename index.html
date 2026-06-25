@@ -538,7 +538,7 @@ async function boot(){
     if(saved.teams) CONFIG.teams = saved.teams;
     if(saved.roles) CONFIG.roles = saved.roles;
     CONFIG.brand  = Object.assign({}, DEFAULT_CONFIG.brand,  saved.brand||{});
-    CONFIG.design = Object.assign({}, DEFAULT_CONFIG.design, saved.design||{});
+    CONFIG.design = Object.assign({}, DEFAULT_CONFIG.design); // 디자인 고정 — 저장값 무시
   }
   CONFIG._v = CONFIG_VERSION;
   if(migrateConfig()) await store.set('config:main', CONFIG);   // 로컬 즉시 마이그레이션 반영
@@ -560,7 +560,7 @@ async function fetchSheetConfigAndApply(){
       CONFIG._catalogV = (typeof c._catalogV === 'number') ? c._catalogV : 0;
       CONFIG._colorV = (typeof c._colorV === 'number') ? c._colorV : 0;
       if(c.brand) CONFIG.brand = Object.assign({}, DEFAULT_CONFIG.brand, c.brand);
-      if(c.design) CONFIG.design = Object.assign({}, DEFAULT_CONFIG.design, c.design);
+      CONFIG.design = Object.assign({}, DEFAULT_CONFIG.design); // 디자인 고정 — 시트값 무시
       if(c.vendorEmail) CONFIG.vendorEmail = c.vendorEmail;
       const migrated = migrateConfig();
       await store.set('config:main', CONFIG);
@@ -1045,12 +1045,11 @@ async function renderAdmin(){
   if(!recs){ recs = (await store.list('applications:')); }
   recs = recs.sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
   const tabs=`<div class="tabs">
-    ${['dash:대시보드','print:인쇄 발주','design:디자인','config:팀·브랜드 설정'].map(t=>{const[k,l]=t.split(':');
+    ${['dash:대시보드','print:인쇄 발주','config:팀·브랜드 설정'].map(t=>{const[k,l]=t.split(':');
       return `<button class="${adminTab===k?'active':''}" onclick="adminTab='${k}';renderAdmin()">${l}</button>`}).join('')}</div>`;
   let body='';
   if(adminTab==='dash') body=adminDash(recs);
   if(adminTab==='print') body=adminPrint(recs);
-  if(adminTab==='design') body=adminDesign();
   if(adminTab==='config') body=adminConfig();
   app.innerHTML=`<div class="screen"><div class="wrap">
     <div class="adm-head"><div><div class="eyebrow">Operations</div>
@@ -1184,51 +1183,11 @@ async function vendorMail(){
 }
 
 /* ---------- ADMIN: 디자인 (no-code) ---------- */
-let designSide='front';
 function previewSample(){ return {reason:'',type:'양면',nameKo:'배민한',nameEn:'Ben',
   team:(CONFIG.teams[0]||{}).name||'커머스팀',role:((CONFIG.roles[0]&&CONFIG.roles[0].ko)||'디테일 이노베이터'),mobile:'010-6864-6438',
   email:'ben@'+(CONFIG.brand.site||'dearcus.com'),ext:'02-000-0000'}; }
-function adminDesign(){
-  const d=CONFIG.design;
-  const opt=(g,sel)=>FONTS[g].map(f=>`<option value="${esc(f.key)}" ${sel===f.key?'selected':''}>${esc(f.label)}</option>`).join('');
-  const sw=(key,label)=>`<div class="swatch"><label>${label}</label><input type="color" value="${d[key]}" oninput="setDesignLive('${key}',this.value)"></div>`;
-  const lay=(k,nm,ds)=>`<button class="choice ${d.layout===k?'sel':''}" style="padding:14px" onclick="setDesignR('layout','${k}')"><div class="nm" style="font-size:13px">${nm}</div><div class="ds">${ds}</div></button>`;
-  const presets=[['클레이',{accent:'#b8543a',ink:'#181613',paper:'#f4f1ea',cardBg:'#fbfaf6',backBg:'#181613'}],
-    ['잉크블루',{accent:'#2f4a8c',ink:'#16213a',paper:'#eef1f6',cardBg:'#ffffff',backBg:'#16213a'}],
-    ['포레스트',{accent:'#3c6e58',ink:'#16241d',paper:'#eef1ec',cardBg:'#ffffff',backBg:'#16241d'}],
-    ['모노',{accent:'#111111',ink:'#111111',paper:'#f1f1ef',cardBg:'#ffffff',backBg:'#111111'}]];
-  const presetBtns=presets.map(p=>`<button class="btn btn-ghost" style="padding:9px 15px;font-size:13px" onclick='applyPreset(${JSON.stringify(p[1])})'>${p[0]}</button>`).join('');
-  return `<div class="grid2">
-    <div>
-      <div class="cfg-card"><h3>테마 프리셋</h3><p class="d">한 번에 색 조합을 적용한 뒤 세부 조정하세요.</p>
-        <div class="row-flex">${presetBtns}</div></div>
-      <div class="cfg-card"><h3>폰트</h3><p class="d">국문까지 지원하는 폰트를 선택하면 자동으로 불러옵니다. 명함 이름은 디스플레이 폰트를 따릅니다.</p>
-        <div class="field"><label>본문 · UI 폰트</label><select onchange="setDesignLive('fontBody',this.value)">${opt('body',d.fontBody)}</select></div>
-        <div class="field"><label>디스플레이 폰트 <span class="hint">제목·명함 이름·영문</span></label><select onchange="setDesignLive('fontDisplay',this.value)">${opt('display',d.fontDisplay)}</select></div>
-        <div class="field" style="margin-bottom:0"><label>Utile Display 웹폰트 URL <span class="hint">DEAR.CUS형 영문에 사용 · 미입력 시 Hanken Grotesk로 대체</span></label>
-          <input value="${esc(d.utileUrl||'')}" placeholder="https://.../UtileDisplay.woff2" onchange="setDesignLive('utileUrl',this.value)"></div></div>
-      <div class="cfg-card"><h3>색상</h3><p class="d">카드 글자색은 배경 밝기에 따라 자동으로 대비 처리됩니다.</p>
-        <div class="color-grid">${sw('accent','강조색')}${sw('ink','본문 잉크')}${sw('paper','페이지 배경')}${sw('cardBg','카드 앞면')}${sw('backBg','카드 뒷면')}</div></div>
-      <div class="cfg-card" style="margin-bottom:0"><h3>명함 레이아웃</h3><p class="d">앞면 구성을 선택하세요. DEAR.CUS형은 첨부 명함과 동일한 로고·QR 레이아웃입니다.</p>
-        <div class="choice-grid">${lay('dearcus','DEAR.CUS형','로고+QR · 첨부 동일')}${lay('side','사이드 룰','좌측 강조선')}${lay('minimal','미니멀','로고 상단 · 여백')}${lay('center','센터','중앙 정렬')}${lay('band','밴드','하단 강조색 띠')}</div></div>
-      <div class="actions"><button class="btn btn-primary" onclick="saveConfig()">디자인 저장</button>
-        <button class="btn btn-ghost" onclick="resetConfig()">기본값 초기화</button></div>
-    </div>
-    <div class="preview-wrap">
-      <div class="preview-label"><span>실시간 미리보기</span>
-        <button class="flip-btn" style="font-size:12px" onclick="flipDPV()">↻ <span id="dpvSide">${designSide==='back'?'뒷면':'앞면'}</span></button></div>
-      <div class="card-stage"><div class="bizcard" id="dpv">${designSide==='back'?cardBackHTML(previewSample()):cardFrontHTML(previewSample())}</div></div>
-      <p class="mini" style="margin-top:14px;text-align:center">변경 즉시 전체 화면·명함에 반영됩니다.</p>
-    </div>
-  </div>`;
-}
-function updateDPV(){ const el=document.getElementById('dpv'); if(el) el.innerHTML=designSide==='back'?cardBackHTML(previewSample()):cardFrontHTML(previewSample());
-  const s=document.getElementById('dpvSide'); if(s)s.textContent=designSide==='back'?'뒷면':'앞면'; }
-function flipDPV(){ designSide=designSide==='front'?'back':'front'; updateDPV(); }
-function setDesignLive(k,v){ CONFIG.design[k]=v; applyTheme();
-  if(k==='backBg'){ refreshBrandQR().then(updateDPV); } updateDPV(); }
-function setDesignR(k,v){ CONFIG.design[k]=v; applyTheme(); renderAdmin(); }
-function applyPreset(obj){ Object.assign(CONFIG.design,obj); applyTheme(); renderAdmin(); }
+/* 디자인 탭 제거됨 — 디자인(색·레이아웃·폰트)은 DEAR.CUS 고정값으로만 동작 */
+
 
 function adminConfig(){
   const c=CONFIG.brand;
