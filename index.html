@@ -1091,24 +1091,34 @@ function adminDash(recs){
     <tbody>${rows}</tbody></table>`;
 }
 function stat(n,l){return `<div class="stat"><div class="n">${n}</div><div class="l">${l}</div></div>`;}
-// 삭제는 시트를 건드리지 않고, "내용 기반 키"를 로컬에 기억해 목록에서 영구 숨김 (재조회/기기무관 유지)
-function recKey(r){ return [r.nameKo||'', r.nameEn||'', r.team||'', r.role||'', r.mobile||'', r.email||''].join('|'); }
+// 삭제: ① 로컬 즉시 숨김(현재 브라우저) + ② 시트에서 실제 삭제(전역·게스트모드 포함)
+function recKey(r){ var n=function(v){return String(v==null?'':v).trim();}; return [n(r.nameKo),n(r.nameEn),n(r.team),n(r.role),n(r.mobile)].join('|'); }
+function recPick(r){ return {id:r.id||'', nameKo:r.nameKo||'', nameEn:r.nameEn||'', team:r.team||'', role:r.role||'', mobile:r.mobile||'', email:r.email||''}; }
 async function getDeletedSet(){ const d=await store.get('meta:deletedKeys'); return new Set(Array.isArray(d)?d.map(String):[]); }
 async function addDeletedKeys(keys){ const s=await getDeletedSet(); keys.forEach(k=>s.add(String(k))); await store.set('meta:deletedKeys',[...s]); }
+async function deleteFromBackend(records){
+  if(!API_URL || String(API_URL).startsWith('__')) return;
+  try{
+    await fetch(API_URL, {method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body: JSON.stringify({ action:'delete', ids:records.map(r=>r.id).filter(Boolean), records }), redirect:'follow'});
+  }catch(e){ console.warn('[sync] 시트 삭제 요청 실패:', e); }
+}
 async function delRec(i){
   const r=(window._adminRecs||[])[i]; if(!r) return;
-  if(!confirm('이 신청 기록을 목록에서 삭제할까요?')) return;
+  if(!confirm('이 신청 기록을 삭제할까요?')) return;
   if(r.id) await store.del('applications:'+r.id);
   await addDeletedKeys([recKey(r)]);
+  await deleteFromBackend([recPick(r)]);
   toast('삭제되었습니다'); renderAdmin();
 }
 async function delSelected(){
   const idx=[...document.querySelectorAll('.dashsel:checked')].map(c=>+c.value);
   if(!idx.length){ toast('선택된 항목이 없습니다'); return; }
-  if(!confirm(idx.length+'건을 목록에서 삭제할까요?')) return;
-  const recs=window._adminRecs||[], keys=[];
-  for(const i of idx){ const r=recs[i]; if(!r)continue; keys.push(recKey(r)); if(r.id) await store.del('applications:'+r.id); }
+  if(!confirm(idx.length+'건을 삭제할까요?')) return;
+  const recs=window._adminRecs||[], keys=[], picks=[];
+  for(const i of idx){ const r=recs[i]; if(!r)continue; keys.push(recKey(r)); picks.push(recPick(r)); if(r.id) await store.del('applications:'+r.id); }
   await addDeletedKeys(keys);
+  await deleteFromBackend(picks);
   toast(keys.length+'건 삭제되었습니다'); renderAdmin();
 }
 async function exportCSV(){
