@@ -287,6 +287,7 @@ const store = {
  *   SHEET_URL       : 관리자가 열 시트 URL (관리자 탭의 '시트 열기' 버튼에 연결)
  */
 const API_URL         = 'https://script.google.com/macros/s/AKfycbwg1rQ4OFrOiL710mhAmLTiWOWHblzdZwZkxpzcmaNM2V12Zfwz-Uv0es-9clK_GKJ8tA/exec';
+try{ console.log('%c[DEAR.CUS] 빌드확인 — API_URL 끝부분: '+API_URL.slice(-22), 'color:#043931;font-weight:bold'); }catch(e){}
 const OAUTH_CLIENT_ID = '257561913417-qs022h85jaefab5uvruddn63ca8dbh9f.apps.googleusercontent.com';
 const ALLOWED_DOMAIN  = 'dearcus.com';
 const SHEET_URL       = 'https://docs.google.com/spreadsheets/d/1K-enU0PaO9cKiPkI9cZzJ_0-0PefBmloffUK7fMBsCY/edit';
@@ -1098,6 +1099,7 @@ async function deleteFromBackend(rows){
   if(!API_URL || String(API_URL).startsWith('__')) return {ok:false};
   try{
     const url = API_URL + '?action=delete&rows=' + encodeURIComponent(JSON.stringify(rows)) + '&_=' + Date.now();
+    console.log('[sync] 삭제 요청 →', url);
     const res = await fetch(url, {redirect:'follow'});
     try{ const d = await res.json(); console.log('[sync] 삭제 결과:', d); return d; }catch(_){ return {ok:true}; }
   }catch(e){ console.warn('[sync] 시트 삭제 실패:', e); return {ok:false}; }
