@@ -1128,54 +1128,59 @@ async function exportCSV(){
 }
 
 function adminPrint(recs){
+  window._printAllRecs = recs;
   const months=[...new Set(recs.map(r=>r.ym))].sort().reverse();
   if(!recs.length) return `<div class="empty">발주할 신청 내역이 없습니다.</div>`;
   const opts=months.map(m=>`<option value="${m}">${m} (${recs.filter(r=>r.ym===m).length}건)</option>`).join('');
   const cur=months[0];
-  const list=recs.filter(r=>r.ym===cur).map(r=>`<tr><td><input type="checkbox" class="checkmini prsel" value="${r.id}" checked></td>
-    <td><b>${esc(r.nameKo)}</b> · ${esc(r.nameEn)}</td><td>${esc(r.team)} ${esc(r.role)}</td><td>${esc(r.type)}</td></tr>`).join('');
   return `<div class="cfg-card"><h3>월별 일괄 인쇄 발주</h3>
-    <p class="d">원티드 방식 그대로 — 선택한 신청건을 하나의 인쇄용 PDF로 묶고, 발주 메일 초안을 생성합니다. 인쇄소엔 PDF 전달 단 한 번의 업무로 끝나요.</p>
+    <p class="d">선택한 신청건을 하나의 인쇄용 벡터 PDF로 묶습니다. 인쇄소엔 이 PDF 한 장만 전달하면 끝이에요.</p>
     <div class="field" style="max-width:280px"><label>인쇄 월</label>
       <select id="prMonth" onchange="reprMonth(this.value)">${opts}</select></div>
-    <table id="prTable"><thead><tr><th style="width:36px"></th><th>이름</th><th>소속</th><th>타입</th></tr></thead><tbody>${list}</tbody></table>
+    <table id="prTable"><thead><tr>
+      <th style="width:36px"><input type="checkbox" class="checkmini" checked onclick="document.querySelectorAll('.prsel').forEach(c=>c.checked=this.checked)"></th>
+      <th>이름</th><th>소속</th><th>타입</th></tr></thead><tbody>${prRows(cur)}</tbody></table>
     <div class="actions">
       <button class="btn btn-primary" onclick="batchPDF()">📦 선택분 통합 PDF 생성</button>
-      <button class="btn btn-clay" onclick="vendorMail()">✉️ 인쇄소 발주 메일 작성</button>
+      <button class="btn btn-clay" onclick="vendorMail()">✉️ 발주 메일 초안 복사</button>
     </div>
     <p class="mini" style="margin-top:14px">발주처: <b>${esc(CONFIG.vendorEmail)}</b> · (설정 탭에서 변경)</p>
   </div>`;
 }
-async function reprMonth(m){
-  const recs=(await store.list('applications:')).filter(r=>r.ym===m);
-  const list=recs.map(r=>`<tr><td><input type="checkbox" class="checkmini prsel" value="${r.id}" checked></td>
+function prRows(month){
+  const recs=(window._printAllRecs||[]).filter(r=>r.ym===month);
+  window._printRecs=recs;
+  return recs.map((r,i)=>`<tr><td><input type="checkbox" class="checkmini prsel" value="${i}" checked></td>
     <td><b>${esc(r.nameKo)}</b> · ${esc(r.nameEn)}</td><td>${esc(r.team)} ${esc(r.role)}</td><td>${esc(r.type)}</td></tr>`).join('');
-  document.querySelector('#prTable tbody').innerHTML=list;
 }
-function selectedIds(){ return [...document.querySelectorAll('.prsel:checked')].map(c=>c.value); }
+function reprMonth(m){ const tb=document.querySelector('#prTable tbody'); if(tb) tb.innerHTML=prRows(m); }
+function selectedPrintRecs(){ return [...document.querySelectorAll('.prsel:checked')].map(c=>(window._printRecs||[])[+c.value]).filter(Boolean); }
 async function batchPDF(){
-  const ids=selectedIds(); if(!ids.length){toast('선택된 항목이 없습니다');return;}
-  toast(`${ids.length}건 통합 PDF 생성 중…`);
-  const {jsPDF}=window.jspdf; const doc=new jsPDF({orientation:'landscape',unit:'mm',format:[94,54]}); let first=true;
-  for(const id of ids){ const r=await store.get('applications:'+id); if(!r)continue;
-    const prev=state.app; state.app=r;
-    const f=await captureSide('front'); if(!first)doc.addPage([90,50],'landscape'); first=false;
-    doc.addImage(f,'PNG',0,0,94,54);
-    if((r.type||'양면')==='양면'){ const b=await captureSide('back'); doc.addPage([94,54],'landscape'); doc.addImage(b,'PNG',0,0,94,54); }
-    state.app=prev;
-    r.status='발주완료'; await store.set('applications:'+id,r);
-  }
-  doc.save('명함_통합인쇄_'+(document.getElementById('prMonth')?.value||'')+'.pdf');
-  toast('통합 PDF 생성 완료 · 상태가 발주완료로 변경되었습니다');
+  const recs=selectedPrintRecs(); if(!recs.length){ toast('선택된 항목이 없습니다'); return; }
+  if(!(window.dcVectorReady && window.dcVectorReady())){ toast('PDF 엔진 로딩 중… 잠시 후 다시 시도해 주세요'); return; }
+  toast(`${recs.length}건 통합 PDF 생성 중…`);
+  try{
+    const {jsPDF}=window.jspdf;
+    const doc=new jsPDF({orientation:'landscape',unit:'mm',format:[94,54],compress:false});
+    let first=true;
+    for(const r of recs){ if(!first) doc.addPage([94,54],'landscape'); await window.addVectorCard(doc, r); first=false; }
+    window.dcCmykPatch(doc);
+    doc.save('명함_통합인쇄_'+(document.getElementById('prMonth')?.value||'')+'.pdf');
+    toast(`통합 PDF 생성 완료 (${recs.length}건)`);
+  }catch(e){ console.error('통합 PDF 실패:', e); toast('통합 PDF 생성 실패 — 콘솔(F12)을 확인해 주세요'); }
 }
 async function vendorMail(){
-  const ids=selectedIds(); const recs=[]; for(const id of ids){const r=await store.get('applications:'+id); if(r)recs.push(r);}
+  const recs=selectedPrintRecs();
   const m=document.getElementById('prMonth')?.value||'';
   const lines=recs.map((r,i)=>`${i+1}. ${r.nameKo} (${r.nameEn}) / ${r.team} ${r.role} / ${r.type}`).join('\n');
   const subj=`[명함 인쇄 발주] ${CONFIG.brand.name} ${m} ${recs.length}건`;
-  const body=`안녕하세요, ${CONFIG.brand.name} 경영관리팀입니다.\n\n${m} 명함 인쇄 발주 요청드립니다. (총 ${recs.length}건)\n\n${lines}\n\n· 규격: 90 x 50mm\n· 인쇄용 통합 PDF는 본 메일에 첨부합니다.\n\n감사합니다.`;
-  window.location.href=`mailto:${encodeURIComponent(CONFIG.vendorEmail)}?subject=${encodeURIComponent(subj)}&body=${encodeURIComponent(body)}`;
-  toast('메일 초안을 열었습니다 · 통합 PDF를 첨부해 발송하세요');
+  const body=`받는사람: ${CONFIG.vendorEmail}\n제목: ${subj}\n\n안녕하세요, ${CONFIG.brand.name} 경영관리팀입니다.\n\n${m} 명함 인쇄 발주 요청드립니다. (총 ${recs.length}건)\n\n${lines}\n\n· 규격: 90 x 50mm (재단 기준)\n· 인쇄용 통합 PDF를 본 메일에 첨부합니다.\n\n감사합니다.`;
+  try{
+    await navigator.clipboard.writeText(body);
+    toast('발주 메일 초안을 복사했어요 · 메일에 붙여넣고 통합 PDF를 첨부해 보내세요');
+  }catch(e){
+    window.prompt('아래 내용을 복사해 사용하세요 (Ctrl+C):', body);
+  }
 }
 
 /* ---------- ADMIN: 디자인 (no-code) ---------- */
@@ -1426,6 +1431,17 @@ boot();
     return frontSVG(a).then(function(fs){ return renderSVG(doc, fs); }).then(function(){
       if((a.type||"양면")==="양면"){ doc.addPage([94,54],"landscape"); return renderSVG(doc, backSVG()); }
     }).then(function(){ cmykPatch(doc); return doc; });
+  };
+  // 통합(여러 명) 인쇄용: 한 doc에 카드 페이지를 이어붙임
+  window.addVectorCard = function(doc, a){
+    return frontSVG(a).then(function(fs){ return renderSVG(doc, fs); }).then(function(){
+      if((a.type||"양면")==="양면"){ doc.addPage([94,54],"landscape"); return renderSVG(doc, backSVG()); }
+    });
+  };
+  window.dcCmykPatch = function(doc){ try{ cmykPatch(doc); }catch(e){} };
+  window.dcVectorReady = function(){
+    var jsPDF=(window.jspdf||{}).jsPDF;
+    return !!(jsPDF && window.opentype && ((window.svg2pdf&&typeof window.svg2pdf.svg2pdf==="function")||typeof window.svg2pdf==="function"||(jsPDF.API&&typeof jsPDF.API.svg==="function")));
   };
   // 진단: 콘솔에서 dcVectorTest() 실행 → 성공 시 PDF 저장, 실패 시 정확한 에러 출력
   window.dcVectorTest = function(){
